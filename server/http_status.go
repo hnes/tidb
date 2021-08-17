@@ -224,6 +224,28 @@ func (s *Server) startHTTPServer() {
 		}
 	})
 	serverMux.HandleFunc("/debug/go1.17-runtime-metrics", func(w http.ResponseWriter, r *http.Request) {
+		// return b - a
+		subFp := func(b, a *metrics.Float64Histogram) *metrics.Float64Histogram {
+			for idx, v := range b.Buckets {
+				if v != a.Buckets[idx] {
+					panic("unexpected")
+				}
+			}
+			c := &metrics.Float64Histogram{}
+			c.Counts = make([]uint64, len(b.Counts))
+			for _, v := range b.Buckets {
+				c.Buckets = append(c.Buckets, v)
+			}
+			for idx, v := range b.Counts {
+				if v >= a.Counts[idx] {
+					c.Counts[idx] = v - a.Counts[idx]
+				} else {
+					fmt.Println(idx, v, a.Counts[idx], a.Buckets[idx], a.Buckets[idx+1], b.Buckets[idx], b.Buckets[idx+1])
+					panic("unexpected")
+				}
+			}
+			return c
+		}
 		medianBucket := func(h *metrics.Float64Histogram) float64 {
 			total := uint64(0)
 			for _, count := range h.Counts {
@@ -241,54 +263,48 @@ func (s *Server) startHTTPServer() {
 		}
 
 		printValidBucket := func(h *metrics.Float64Histogram) {
+			fmt.Fprintln(w, ">>>", len(h.Counts), len(h.Buckets), h.Buckets[len(h.Buckets)-1])
 			for i, count := range h.Counts {
 				if count > 0 {
-					fmt.Fprintf(w, "[%v,%v],", count, h.Buckets[i])
+					fmt.Fprintf(w, "  (%v, [%v, %v])\n", count, h.Buckets[i], h.Buckets[i+1])
 				}
 			}
 		}
-		// Get descriptions for all supported metrics.
-		descs := metrics.All()
+		getSchedLatencyHistogram := func() *metrics.Float64Histogram {
+			// Name of the metric we want to read.
+			const myMetric = "/sched/latencies:seconds"
 
-		// Create a sample for each metric.
-		samples := make([]metrics.Sample, len(descs))
-		for i := range samples {
-			samples[i].Name = descs[i].Name
-		}
+			// Create a sample for the metric.
+			sample := make([]metrics.Sample, 1)
+			sample[0].Name = myMetric
 
-		// Sample the metrics. Re-use the samples slice if you can!
-		metrics.Read(samples)
+			// Sample the metric.
+			metrics.Read(sample)
 
-		// Iterate over all results.
-		for _, sample := range samples {
-			// Pull out the name and value.
-			name, value := sample.Name, sample.Value
-
-			// Handle each sample.
-			switch value.Kind() {
-			case metrics.KindUint64:
-				fmt.Fprintf(w, "%s: %d KindUint64\n", name, value.Uint64())
-			case metrics.KindFloat64:
-				fmt.Fprintf(w, "%s: %f KindFloat64\n", name, value.Float64())
-			case metrics.KindFloat64Histogram:
-				// The histogram may be quite large, so let's just pull out
-				// a crude estimate for the median for the sake of this example.
-				fmt.Fprintf(w, "%s: %f KindFloat64Histogram", name, medianBucket(value.Float64Histogram())) //value.Float64Histogram())
-				printValidBucket(value.Float64Histogram())
-				fmt.Fprintf(w, "\n")
-			case metrics.KindBad:
-				// This should never happen because all metrics are supported
-				// by construction.
-				panic("bug in runtime/metrics package!")
-			default:
-				// This may happen as new metrics get added.
-				//
-				// The safest thing to do here is to simply log it somewhere
-				// as something to look into, but ignore it for now.
-				// In the worst case, you might temporarily miss out on a new metric.
-				fmt.Fprintf(w, "%s: unexpected metric Kind: %v default\n", name, value.Kind())
+			// Check if the metric is actually supported.
+			// If it's not, the resulting value will always have
+			// kind KindBad.
+			if sample[0].Value.Kind() == metrics.KindBad {
+				panic(fmt.Sprintf("metric %q no longer supported", myMetric))
 			}
+
+			// Handle the result.
+			//
+			// It's OK to assume a particular Kind for a metric;
+			// they're guaranteed not to change.
+			return sample[0].Value.Float64Histogram()
 		}
+		a := getSchedLatencyHistogram()
+		time.Sleep(time.Second)
+		b := getSchedLatencyHistogram()
+		_ = a
+		_ = b
+		_ = subFp
+		fmt.Fprintln(w, "-----diff")
+		c := subFp(b, a)
+		printValidBucket(c)
+		fmt.Fprintln(w, "\n-----median")
+		fmt.Fprintln(w, medianBucket(c))
 	})
 	serverMux.HandleFunc("/debug/gogc", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
