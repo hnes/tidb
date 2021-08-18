@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -246,6 +247,27 @@ func (s *Server) startHTTPServer() {
 			}
 			return c
 		}
+		sumAll := func(h *metrics.Float64Histogram) (bottomSum, medianSum, topSum float64) {
+			//fmt.Println("")
+			if len(h.Counts)+1 != len(h.Buckets) {
+				panic("unexpected")
+			}
+			if math.IsInf(h.Buckets[len(h.Counts)], 1) == false {
+				panic("unexpected")
+			}
+			//fmt.Println(">>>", len(h.Counts), len(h.Buckets), h.Buckets[len(h.Buckets)-1])
+			for i, count := range h.Counts {
+				if count > 0 {
+					countFloat := float64(count)
+					bottomSum = bottomSum + countFloat*h.Buckets[i]
+					m := (h.Buckets[i] + h.Buckets[i+1]) / 2
+					medianSum = medianSum + countFloat*m
+					topSum = topSum + countFloat*h.Buckets[i+1]
+				}
+				//fmt.Printf("(%v, [%v, %v]),", i, h.Buckets[i], h.Buckets[i+1])
+			}
+			return
+		}
 		medianBucket := func(h *metrics.Float64Histogram) float64 {
 			total := uint64(0)
 			for _, count := range h.Counts {
@@ -294,17 +316,22 @@ func (s *Server) startHTTPServer() {
 			// they're guaranteed not to change.
 			return sample[0].Value.Float64Histogram()
 		}
+		startT := time.Now()
 		a := getSchedLatencyHistogram()
 		time.Sleep(time.Second)
 		b := getSchedLatencyHistogram()
+		deltaT := time.Since(startT)
 		_ = a
 		_ = b
 		_ = subFp
-		fmt.Fprintln(w, "-----diff")
+		fmt.Fprintln(w, "-----diff", deltaT)
 		c := subFp(b, a)
 		printValidBucket(c)
 		fmt.Fprintln(w, "\n-----median")
 		fmt.Fprintln(w, medianBucket(c))
+		fmt.Fprintln(w, "\n-----sum")
+		bottomSum, medianSum, topSum := sumAll(c)
+		fmt.Fprintln(w, bottomSum, medianSum, topSum)
 	})
 	serverMux.HandleFunc("/debug/gogc", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
